@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Path, State},
     response::IntoResponse,
     routing::post,
 };
@@ -92,9 +92,24 @@ async fn register_node_handler(
     let data = format!("{node_address}|{node_id}");
     match state
         .mothership_db
-        .insert(topic_name.clone().into_bytes(), data.into_bytes())
+        .insert(topic_name.clone().into_bytes(), data.clone().into_bytes())
     {
-        Ok(_) => {}
+        Ok(previous) => match previous {
+            Some(previous) => {
+                match to_string(previous) {
+                    Some(previous) => {
+                        event!(
+                            Level::INFO,
+                            message = "node location updated",
+                            previous,
+                            new = data
+                        )
+                    }
+                    None => {}
+                };
+            }
+            None => {}
+        },
         Err(_) => {
             event!(
                 Level::ERROR,
@@ -123,22 +138,22 @@ fn to_string(input: IVec) -> Option<String> {
     }
 }
 
-fn get_topic_node_info(
-    topic_name: String,
-    mothership_db: Db,
-) -> Result<(String, String), (StatusCode, Json<Value>)> {
-    let node_data = match mothership_db.get(topic_name.clone().into_bytes()) {
+async fn get_topic_node_info(
+    Path(topic_name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let node_data = match state.mothership_db.get(topic_name.clone().into_bytes()) {
         Ok(o) => match o {
             Some(node_data) => match to_string(node_data) {
                 Some(node_data) => node_data,
                 None => {
-                    return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))));
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({})));
                 }
             },
-            None => return Err((StatusCode::BAD_REQUEST, Json(json!({})))),
+            None => return (StatusCode::BAD_REQUEST, Json(json!({}))),
         },
         Err(_) => {
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))));
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({})));
         }
     };
 
@@ -152,10 +167,10 @@ fn get_topic_node_info(
                 topic_name,
                 node_data,
             );
-            return Err((
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "bad data for mothership entry"})),
-            ));
+            );
         }
     };
     let node_id = match data_split.next() {
@@ -167,13 +182,21 @@ fn get_topic_node_info(
                 topic_name,
                 node_data,
             );
-            return Err((
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "bad data for mothership entry"})),
-            ));
+            );
         }
     };
-    Ok((node_address.to_string(), node_id.to_string()))
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "node_address": node_address,
+            "node_id": node_id,
+            "node_topic": topic_name
+        })),
+    )
 }
 
 #[derive(Serialize, Deserialize)]
